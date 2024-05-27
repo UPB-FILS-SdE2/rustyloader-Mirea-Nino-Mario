@@ -3,19 +3,18 @@ use std::arch::asm;
 use std::env;
 use std::ffi::CStr;
 use std::sync::Mutex;
+use once_cell::sync::Lazy;
 
 #[derive(Debug)]
 pub struct Segment {
-    address: usize,
-    size: usize,
-    file_offset: usize,
-    file_size: usize,
-    flags: nix::sys::mman::ProtFlags,
+    pub address: usize,
+    pub size: usize,
+    pub file_offset: usize,
+    pub file_size: usize,
+    pub flags: nix::sys::mman::ProtFlags,
 }
 
-lazy_static::lazy_static! {
-    static ref SEGMENTS: Mutex<Vec<Segment>> = Mutex::new(Vec::new());
-}
+pub static SEGMENTS: Lazy<Mutex<Vec<Segment>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -45,54 +44,59 @@ pub fn exec_run(base_address: usize, entry_point: usize) {
     let phdr =
         unsafe { &*((base_address + (*ehdr).e_phoff as usize) as *const u8 as *const Elf32_Phdr) };
 
-    let mut auxv;
+    let argv = vec![env::current_exe().unwrap().to_str().unwrap().as_ptr() as *const u8];
+    let envp = unsafe { environ };
 
-    let env_address = unsafe {
-        let mut env = environ;
-
-        while !(*env).is_null() {
-            let arg: &CStr = CStr::from_ptr(*env as *const i8);
-            let arg_slice: &str = arg.to_str().unwrap();
-            println!("env {}", arg_slice);
-            env = env.offset(1);
-        }
-
-        println!("printed arguments");
-
-        env = env.offset(1);
-
-        auxv = &mut *(env as *mut u8 as *mut Elf32AuxV);
-
-        let argv = environ.offset(-(env::args().len() as isize + 2));
-
-        *argv.offset(2) = *argv.offset(1);
-        *argv.offset(1) = (env::args().len() - 1) as *mut u8;
-
-        argv.offset(1)
-    };
-
-    while auxv.a_type != AT_NULL {
-        match auxv.a_type {
-            AT_PHDR => auxv.a_un.a_val = phdr as *const Elf32_Phdr as u32,
-            AT_BASE => auxv.a_un.a_val = 0,
-            AT_ENTRY => auxv.a_un.a_val = ehdr.e_entry,
-            AT_EXECFN => auxv.a_un.a_val = 0,
-            _ => {}
-        }
-        auxv = unsafe { &mut *(auxv as *mut Elf32AuxV).offset(1) };
-    }
+    let auxv = [
+        Elf32AuxV {
+            a_type: AT_PHDR,
+            a_un: Elf32AuxVBindgenTy1 {
+                a_val: base_address as u32 + ehdr.e_phoff,
+            },
+        },
+        Elf32AuxV {
+            a_type: AT_BASE,
+            a_un: Elf32AuxVBindgenTy1 {
+                a_val: base_address as u32,
+            },
+        },
+        Elf32AuxV {
+            a_type: AT_ENTRY,
+            a_un: Elf32AuxVBindgenTy1 {
+                a_val: entry_point as u32,
+            },
+        },
+        Elf32AuxV {
+            a_type: AT_EXECFN,
+            a_un: Elf32AuxVBindgenTy1 {
+                a_val: argv[0] as u32,
+            },
+        },
+        Elf32AuxV {
+            a_type: AT_NULL,
+            a_un: Elf32AuxVBindgenTy1 { a_val: 0 },
+        },
+    ];
 
     unsafe {
         asm!(
-            "mov esp, ebx
-            xor ebx, ebx
-            xor ecx, ecx
-            xor edx, edx
-            xor ebp, ebp
-            xor esi, esi
-            xor edi, edi
-            jmp eax",
-            in("eax") entry_point, in("ebx") env_address);
+            "mov eax, 0",
+            "mov ebx, {0}",
+            "mov ecx, {1}",
+            "mov edx, {2}",
+            "mov esi, {3}",
+            "mov edi, {4}",
+            "mov ebp, {5}",
+            "jmp {6}",
+            in(reg) argv.as_ptr(),
+            in(reg) envp,
+            in(reg) auxv.as_ptr(),
+            in("esi") base_address,
+            in("edi") entry_point,
+            in("ebp") 0,
+            in("eax") entry_point,
+            options(noreturn)
+        );
     }
 }
 

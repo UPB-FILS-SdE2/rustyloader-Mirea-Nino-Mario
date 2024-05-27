@@ -3,12 +3,15 @@ use std::error::Error;
 use std::os::raw::{c_int, c_void};
 use std::fs::File;
 use std::io::Read;
-use std::mem;
 use std::ptr;
 use std::sync::Mutex;
+use once_cell::sync::Lazy;
 
 mod runner;
-mod mod;
+
+
+use elf_module::{SEGMENTS, Segment};
+use object::{Object, ObjectSegment};
 
 extern "C" fn sigsegv_handler(_signal: c_int, siginfo: *mut siginfo_t, _extra: *mut c_void) {
     let address = unsafe { (*siginfo).si_addr() } as usize;
@@ -42,16 +45,14 @@ extern "C" fn sigsegv_handler(_signal: c_int, siginfo: *mut siginfo_t, _extra: *
                     0,
                 );
 
-                if result.is_err() {
+                if result == nix::sys::mman::MAP_FAILED {
                     eprintln!("Failed to map memory at address: 0x{:x}", page_start);
                     std::process::exit(-200);
                 }
 
-                let result = std::ptr::copy_nonoverlapping(data.as_ptr(), page_start as *mut u8, length);
-                if result.is_err() {
-                    eprintln!("Failed to copy data to mapped memory at address: 0x{:x}", page_start);
-                    std::process::exit(-200);
-                }
+                let dest_ptr = page_start as *mut u8;
+                let src_ptr = data.as_ptr();
+                ptr::copy_nonoverlapping(src_ptr, dest_ptr, length);
             }
 
             break;
@@ -130,7 +131,6 @@ fn exec(filename: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 2 {
@@ -140,3 +140,4 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     exec(&args[1])
 }
+
